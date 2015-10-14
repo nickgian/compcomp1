@@ -7,7 +7,8 @@ Require Import pos.
 Require Import stack. 
 Require Import cast.
 
-Require Import ssreflect ssrbool ssrnat ssrfun eqtype seq fintype finfun.
+Require Import Program.
+Require Import ssreflect Ssreflect.seq ssrbool ssrnat ssrfun eqtype seq fintype finfun.
 Set Implicit Arguments.
 
 (*NOTE: because of redefinition of [val], these imports must appear 
@@ -562,3 +563,400 @@ move=> Hfun m m' m'' ge tp tp' tp''; case; move {tp tp' m m'}.
 Qed.
 
 End ConcurLemmas.
+
+Module FineConcur. Section FineConcur.
+
+Import ThreadPool.
+
+Context {sem : Modsem.t}.
+
+Notation thread_pool := (t sem).
+Notation the_sem := (Modsem.sem sem).
+Notation perm_map := PermMap.t.
+
+Variable aggelos : nat -> perm_map.
+Variable fschedule : nat -> nat.
+
+Section Corestep.
+
+Variable the_ge : Genv.t (Modsem.F sem) (Modsem.V sem).
+
+Inductive fstep : thread_pool -> mem -> thread_pool -> mem -> Prop :=
+  | step_congr : 
+      forall tp m c m' (c' : Modsem.C sem),
+      let: n := counter tp in
+      let: tid0 := fschedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+      let: tid := Ordinal tid0_lt_pf in
+      getThread tp tid = Krun c ->
+      corestep the_sem the_ge c m c' m' ->
+      fstep tp m (schedNext (updThread tp tid (Krun c'))) m'
+
+  | step_stage :
+      forall tp m c ef args,
+      let: n := counter tp in
+      let: tid0 := fschedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+      let: tid := Ordinal tid0_lt_pf in
+      getThread tp tid = Krun c ->
+      semantics.at_external the_sem c = Some (ef, ef_sig ef, args) ->
+      handled ef ->
+      fstep tp m (schedNext (updThread tp tid (Kstage ef args c))) m
+
+  | step_lock :
+      forall tp m c m'' c' m' b ofs,
+      let: n := counter tp in
+      let: tid0 := fschedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+      let: tid := Ordinal tid0_lt_pf in
+      getThread tp tid = Kstage LOCK (Vptr b ofs::nil) c ->
+      Mem.load Mint32 m b (Int.intval ofs) = Some (Vint Int.one) ->
+      Mem.store Mint32 m b (Int.intval ofs) (Vint Int.zero) = Some m'' ->
+      semantics.after_external the_sem (Some (Vint Int.zero)) c = Some c' ->
+      updPermMap m'' (aggelos n) = Some m' -> 
+      fstep tp m (updThread tp tid (Krun c')) m'
+
+  | step_unlock :
+      forall tp m c m'' c' m' b ofs,
+      let: n := counter tp in
+      let: tid0 := fschedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+      let: tid := Ordinal tid0_lt_pf in
+      getThread tp tid = Kstage UNLOCK (Vptr b ofs::nil) c ->
+      Mem.load Mint32 m b (Int.intval ofs) = Some (Vint Int.zero) ->
+      Mem.store Mint32 m b (Int.intval ofs) (Vint Int.one) = Some m'' ->
+      semantics.after_external the_sem (Some (Vint Int.zero)) c = Some c' ->
+      updPermMap m'' (aggelos n) = Some m' -> 
+      fstep tp m (updThread tp tid (Krun c')) m
+
+  | step_create :
+      forall tp m c c' c_new vf arg,
+      let: n := counter tp in
+      let: tid0 := fschedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+      let: tid := Ordinal tid0_lt_pf in
+      getThread tp tid = Kstage CREATE (vf::arg::nil) c ->
+      semantics.initial_core the_sem the_ge vf (arg::nil) = Some c_new ->
+      semantics.after_external the_sem (Some (Vint Int.zero)) c = Some c' ->
+      fstep tp m (schedNext (addThread (updThread tp tid (Krun c')) (Krun c_new))) m.
+
+End Corestep.
+
+Lemma fstep_inv the_ge tp c m tp' m' ef sig args : 
+  let: n := counter tp in
+  let: tid0 := fschedule n in
+  forall (tid0_lt_pf :  tid0 < num_threads tp),
+  let: tid := Ordinal tid0_lt_pf in
+  getThread tp tid = Krun c ->
+  semantics.at_external the_sem c = Some (ef, sig, args) -> 
+  handled ef = false -> 
+  ~ fstep the_ge tp m tp' m'.
+Proof. 
+move=> pf get Hat; move/handledP=> Hhdl step. 
+case: step pf get Hat Hhdl n; move {tp m tp' m'}.
+{ move=> ????? pf get step pf'; have ->: pf' = pf by apply: proof_irr.
+  intros get0 at_ext handl. rewrite get in get0. inversion get0; subst.
+  
+   erewrite corestep_not_at_external in at_ext; eauto. discriminate.
+}
+{ move=> ????? pf get Hat Hhdl pf'; have ->: pf' = pf by apply: proof_irr.
+  rewrite get; case=> <-; rewrite Hat; case=> <- /= _ _ Contra _. 
+  by apply: Contra; apply/handledP.
+}
+{ move=> ???????? pf get Hat ??? pf'; have ->: pf' = pf by apply: proof_irr.
+  by rewrite get.
+}
+{ move=> ???????? pf get Hat ??? pf'; have ->: pf' = pf by apply: proof_irr.
+  by rewrite get.
+}
+{ move=> ??????? pf get init aft pf'; have ->: pf' = pf by apply: proof_irr.
+  by rewrite get.
+}
+Qed.
+
+Lemma my_ltP m n : (m < n)%coq_nat -> (m < n).
+Proof. by move/ltP. Qed.
+
+Definition at_external (tp : thread_pool) 
+  : option (external_function * signature * seq val) := 
+  let: n := counter tp in
+  let: tid0 := fschedule n in
+  match lt_dec tid0 (num_threads tp) with
+    | left lt_pf => 
+      let: tid := Ordinal (my_ltP lt_pf) in
+      match getThread tp tid with 
+        | Krun c => 
+          match semantics.at_external the_sem c with
+            | None => None
+            | Some (ef, sg, args) => 
+              if handled ef then None 
+              else Some (ef, sg, args)
+          end
+        | Kstage _ _ _ => None
+      end
+    | right _ => None
+  end.
+
+Definition after_external (ov : option val) (tp : thread_pool) :=
+  let: n := counter tp in
+  let: tid0 := fschedule n in
+  match lt_dec tid0 (num_threads tp) with
+    | left lt_pf => 
+      let: tid := Ordinal (my_ltP lt_pf) in
+      match getThread tp tid with 
+        | Krun c => 
+          match semantics.after_external the_sem ov c with
+            | None => None
+            | Some c' => Some (schedNext (updThread tp tid (Krun c')))
+          end
+        | Kstage _ _ _ => None
+      end
+    | right _ => None
+  end.
+
+Definition one_pos : pos := mkPos NPeano.Nat.lt_0_1.
+
+Section InitialCore.
+
+Variable ge : Genv.t (Modsem.F sem) (Modsem.V sem).
+
+Definition initial_core (f : val) (args : list val) : option thread_pool :=
+  match initial_core the_sem ge f args with
+    | None => None
+    | Some c => 
+      Some (ThreadPool.mk 
+              one_pos 
+              (fun tid => if tid == ord0 then Krun c 
+                          else Krun c (*bogus value; can't occur*))
+              0)
+  end.
+
+End InitialCore.
+
+Definition halted (tp : thread_pool) : option val := None.
+
+Program Definition semantics :
+  CoreSemantics (Genv.t (Modsem.F sem) (Modsem.V sem)) thread_pool mem :=
+  Build_CoreSemantics _ _ _
+    initial_core 
+    at_external
+    after_external
+    halted
+    fstep
+    _ _ _.
+Next Obligation.
+rewrite /at_external.
+case Hlt: (lt_dec _ _)=> //[a].
+case Hget: (getThread _ _)=> //[c].
+case Hat: (semantics.at_external _ _)=>[[[ef sg]  args]|//].
+case Hhdl: (handled _)=> //.
+elimtype False; apply: (fstep_inv (my_ltP a) Hget Hat Hhdl H).
+Qed.
+  
+End FineConcur.
+End FineConcur.
+
+(* Move to another file*)
+Section In2.
+
+Variable A : Type.
+
+Variable x y : A.
+
+Fixpoint In2 (l : seq A) {struct l} : Prop :=
+  match l with
+      | nil => False
+      | a :: l' =>
+        match l' with
+          | nil => False
+          | b :: l'' => (a = x /\ b = y) \/ (In2 l')
+        end
+  end.
+
+Lemma in2_strengthen :
+  forall zs ys,
+    In2 zs ->
+    In2 (ys ++ zs).
+Proof.
+  intros zs ys IN2.
+  destruct zs. inversion IN2.
+  induction ys. auto.
+  destruct ys. simpl. right. assumption.
+  simpl. right. auto.
+Qed.
+
+Lemma in2_trivial : forall xs ys,
+  In2 (xs ++ x :: y :: ys).
+Proof.
+  intros xs ys. induction xs; intros. simpl; auto.
+  simpl.
+  destruct (xs ++ x :: y :: ys). inversion IHxs.
+  right; assumption.
+Qed.
+
+Lemma In2_inv xs xmid xs' :
+  In2 (xs ++ xmid :: xs') ->
+  In2 (xs ++ [:: xmid]) \/
+  In2 (xmid :: xs').
+Proof.
+  intros IN2.
+  induction xs.
+  - rewrite cat0s in IN2.
+    right; trivial.
+  - destruct xs.
+    + destruct IN2 as [[E1 E2] | IN2].
+      * subst.
+        left; simpl; auto.
+      * right; assumption.
+    + destruct IN2 as [[E1 E2] | IN2].
+      * subst. left; simpl; auto.
+      * apply IHxs in IN2.
+        destruct IN2 as [IN2 | IN2].
+        { left. simpl; right; auto. }
+        { right. trivial. }
+Qed.
+
+End In2.
+
+Lemma In2_implies_In (A : eqType) (x y : A) xs :
+  In2 x y xs ->
+  x \in xs.
+Proof.
+  intros IN2.
+  induction xs.
+  - now destruct IN2.
+  - destruct xs.
+    + now destruct IN2.
+    + destruct IN2 as [[? ?] | IN2]; subst.
+      * by rewrite inE eqxx.
+      * rewrite inE; apply/orP; right. apply IHxs; assumption.
+Qed.
+
+
+(* Simulation between fine and coarse grained semantics *)
+Section ConcurEquiv.
+
+  Import ThreadPool.
+  Import FineConcur Concur.
+  Context {sem : Modsem.t}.
+
+  Notation thread_pool := (t sem).
+  Notation the_sem := (Modsem.sem sem).
+  Notation perm_map := PermMap.t.
+
+  Variable aggelos : nat -> perm_map.
+
+  Variable the_ge : Genv.t (Modsem.F sem) (Modsem.V sem).
+
+  Require Import Coq.Relations.Relation_Operators.
+
+  Definition multifine sched :=
+    clos_trans _ (fun p1 p2 => fstep aggelos sched the_ge
+                                     (fst p1) (snd p1) (fst p2) (snd p2)).
+
+  
+  Inductive schedType (n : nat) : Type :=
+  | schedCore : ordinal n -> schedType n
+  | schedExt : ordinal n -> schedType n.
+  
+  Fixpoint filter_core {m:nat} (n : ordinal m) (xs : seq (schedType m)) :=
+    match xs with
+      | nil => nil
+      | x :: xs' =>
+        match x with
+          | schedCore k =>
+            if beq_nat (nat_of_ord k) (nat_of_ord n) then
+              filter_core n xs'
+            else x :: (filter_core n xs')
+          | schedExt k =>
+            if beq_nat (nat_of_ord k) (nat_of_ord n) then
+              xs
+            else
+              x :: (filter_core n xs')
+        end
+    end.
+
+  Lemma length_filter_core :
+    forall {m} n (xs : seq (schedType m)),
+      size (filter_core n xs) <= (size xs).
+  Proof.
+    intros.
+    induction xs as [|x xs']; simpl; auto.
+    destruct x as [k | k];
+      destruct (beq_nat k n); auto.
+  Defined.
+    
+  Program Fixpoint buildSched {m} (fs : seq (schedType m))
+          {measure (size fs)}:=
+    match fs with
+      | nil => nil
+      | (schedCore n) :: fs' =>
+        if has (fun x => match x with schedExt n => true | _ => false end) fs then
+          (schedCore n) :: (buildSched (filter_core n fs'))
+        else
+          buildSched (filter_core n fs')
+      | (schedExt n) :: fs' =>
+        (schedExt n) :: buildSched fs'
+    end.
+  Solve All Obligations using
+        (program_simpl;
+         simpl in *;
+           apply le_lt_n_Sm; apply/leP;
+         apply length_filter_core).
+
+  Definition trace (fsched : nat -> nat) :=
+    {xs : seq (thread_pool * mem) |
+     forall x y, In2 x y xs ->
+                 fstep aggelos fsched the_ge (fst x) (snd x) (fst y) (snd y)}.
+
+
+  Lemma csched_exists :
+    forall {m} (pf: m > 0) (fs : seq (schedType m)) (counter : nat),
+    exists (csched : nat -> nat),
+      forall i,
+        i < size (buildSched fs) ->
+        csched (counter + i) =
+        nth 0
+            (map (fun (x : schedType m) => match x with
+                        | schedCore n => nat_of_ord n
+                        | schedExt n => nat_of_ord n
+                                           end) (buildSched fs)) i.
+  Proof.
+    intros.
+    generalize dependent (buildSched fs).
+    apply last_ind.
+    { simpl.
+      exists (fun (n : nat) => 0).
+      intros ? Hcontra.
+      exfalso. by rewrite ltn0 in Hcontra. }
+    { intros cs c IHcs.
+      destruct IHcs as [csched IHcs].
+      exists (fun n => if n == (counter0 + size cs) then
+                         nat_of_ord (match c with
+                                       | schedCore k => k
+                                       | schedExt k => k end)
+                       else csched n).
+      intros i Hsize.
+      rewrite size_rcons ltnS leq_eqVlt in Hsize.
+      move/orP:Hsize => [/eqP Heq | Hprev].
+      { subst. rewrite eq_refl.
+        erewrite nth_map.
+        erewrite nth_rcons. rewrite ltnn eq_refl.
+        case c; auto.
+          by rewrite size_rcons. }
+      { rewrite ifN_eq.
+        specialize (IHcs i Hprev).
+        erewrite nth_map in *; auto.
+        erewrite nth_rcons. rewrite Hprev. eauto.
+        rewrite size_rcons. auto.
+        apply contraNneq with (b:= false). auto. move/eqP => Hcontra. exfalso.
+        rewrite eqn_add2l in Hcontra.
+        move/eqP: Hcontra => Hcontra. subst. by rewrite ltnn in Hprev.
+        auto.
+        Grab Existential Variables. auto.
+        auto. auto.
+      }
+    }
+  Qed.
+
+End ConcurEquiv.
