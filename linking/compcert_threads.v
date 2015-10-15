@@ -582,7 +582,7 @@ Section Corestep.
 Variable the_ge : Genv.t (Modsem.F sem) (Modsem.V sem).
 
 Inductive fstep : thread_pool -> mem -> thread_pool -> mem -> Prop :=
-  | step_congr : 
+  | fstep_congr : 
       forall tp m c m' (c' : Modsem.C sem),
       let: n := counter tp in
       let: tid0 := fschedule n in
@@ -592,7 +592,7 @@ Inductive fstep : thread_pool -> mem -> thread_pool -> mem -> Prop :=
       corestep the_sem the_ge c m c' m' ->
       fstep tp m (schedNext (updThread tp tid (Krun c'))) m'
 
-  | step_stage :
+  | fstep_stage :
       forall tp m c ef args,
       let: n := counter tp in
       let: tid0 := fschedule n in
@@ -603,7 +603,7 @@ Inductive fstep : thread_pool -> mem -> thread_pool -> mem -> Prop :=
       handled ef ->
       fstep tp m (schedNext (updThread tp tid (Kstage ef args c))) m
 
-  | step_lock :
+  | fstep_lock :
       forall tp m c m'' c' m' b ofs,
       let: n := counter tp in
       let: tid0 := fschedule n in
@@ -616,7 +616,7 @@ Inductive fstep : thread_pool -> mem -> thread_pool -> mem -> Prop :=
       updPermMap m'' (aggelos n) = Some m' -> 
       fstep tp m (updThread tp tid (Krun c')) m'
 
-  | step_unlock :
+  | fstep_unlock :
       forall tp m c m'' c' m' b ofs,
       let: n := counter tp in
       let: tid0 := fschedule n in
@@ -629,7 +629,7 @@ Inductive fstep : thread_pool -> mem -> thread_pool -> mem -> Prop :=
       updPermMap m'' (aggelos n) = Some m' -> 
       fstep tp m (updThread tp tid (Krun c')) m
 
-  | step_create :
+  | fstep_create :
       forall tp m c c' c_new vf arg,
       let: n := counter tp in
       let: tid0 := fschedule n in
@@ -832,7 +832,6 @@ Proof.
       * rewrite inE; apply/orP; right. apply IHxs; assumption.
 Qed.
 
-
 (* Simulation between fine and coarse grained semantics *)
 Section ConcurEquiv.
 
@@ -848,12 +847,9 @@ Section ConcurEquiv.
 
   Variable the_ge : Genv.t (Modsem.F sem) (Modsem.V sem).
 
-  Require Import Coq.Relations.Relation_Operators.
 
-  Definition multifine sched :=
-    clos_trans _ (fun p1 p2 => fstep aggelos sched the_ge
-                                     (fst p1) (snd p1) (fst p2) (snd p2)).
-
+  (* Relating a fine grained and a coarse grained schedule*)
+  Variable fsched : nat -> nat.
   
   Inductive schedType (n : nat) : Type :=
   | schedCore : ordinal n -> schedType n
@@ -904,11 +900,30 @@ Section ConcurEquiv.
            apply le_lt_n_Sm; apply/leP;
          apply length_filter_core).
 
-  Definition trace (fsched : nat -> nat) :=
+  Definition trace :=
     {xs : seq (thread_pool * mem) |
      forall x y, In2 x y xs ->
                  fstep aggelos fsched the_ge (fst x) (snd x) (fst y) (snd y)}.
 
+  Lemma pf1 : 1 < 5. auto. Defined.
+  Lemma pf2 : 2 < 5. auto. Defined.
+  
+  Eval compute in buildSched ((schedCore (Ordinal pf1)) ::
+                                                        (schedCore (Ordinal pf2)) ::
+                                                        (schedCore (Ordinal pf1)) ::
+                                              (schedCore (Ordinal pf2)) ::
+                                              (schedExt (Ordinal pf1)) ::
+                                              (schedExt (Ordinal pf2)) ::
+                                              (schedCore (Ordinal pf2)) :: nil).
+  
+  Definition traceSched (xs : trace
+
+  
+  Require Import Coq.Relations.Relation_Operators.
+
+  Definition multifine sched :=
+    clos_trans _ (fun p1 p2 => fstep aggelos sched the_ge
+                                     (fst p1) (snd p1) (fst p2) (snd p2)).
 
   Lemma csched_exists :
     forall {m} (pf: m > 0) (fs : seq (schedType m)) (counter : nat),
@@ -957,6 +972,6 @@ Section ConcurEquiv.
         auto. auto.
       }
     }
-  Qed.
+  Qed. 
 
 End ConcurEquiv.
