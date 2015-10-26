@@ -119,10 +119,18 @@ Section permMapDefs.
                            Maps.PMap.get b (PermMap.map pmap1) ofs Cur = Some p1 ->
                            Maps.PMap.get b (PermMap.map pmap2) ofs Cur = Some p2 ->
                            Maps.PMap.get b (PermMap.map pmap3) ofs Cur = perm_union p1 p2)
-               (HmapCur: forall (b : positive) (ofs : Z) (p1 p2 : permission),
-                           Maps.PMap.get b (PermMap.map pmap1) ofs Cur = Some p1 ->
-                           Maps.PMap.get b (PermMap.map pmap2) ofs Cur = Some p2 ->
-                           Maps.PMap.get b (PermMap.map pmap3) ofs Cur = Some (perm_max p1 p2)),
+               (HmapCurNone: forall (b : positive) (ofs : Z) (p1 p2 : permission),
+                           (Maps.PMap.get b (PermMap.map pmap1) ofs Cur = None \/
+                           Maps.PMap.get b (PermMap.map pmap2) ofs Cur = None) ->
+                           Maps.PMap.get b (PermMap.map pmap3) ofs Cur = None)
+               (HmapMax: forall (b : positive) (ofs : Z) (p1 p2 : permission),
+                           Maps.PMap.get b (PermMap.map pmap1) ofs Max = Some p1 ->
+                           Maps.PMap.get b (PermMap.map pmap2) ofs Max = Some p2 ->
+                           Maps.PMap.get b (PermMap.map pmap3) ofs Max = Some (perm_max p1 p2))
+               (HmapMax: forall (b : positive) (ofs : Z) (p1 p2 : permission),
+                           (Maps.PMap.get b (PermMap.map pmap1) ofs Max = None \/
+                           Maps.PMap.get b (PermMap.map pmap2) ofs Max = None) ->
+                           Maps.PMap.get b (PermMap.map pmap3) ofs Max = None),
           permMapsUnion pmap1 pmap2 pmap3.
 
 End permMapDefs.
@@ -323,12 +331,12 @@ Inductive step : thread_pool -> mem -> thread_pool -> mem -> Prop :=
       let: n := counter tp in
       let: tid0 := schedule n in
       forall (tid0_lt_pf :  tid0 < num_threads tp),
-      let: tid := Ordinal tid0_lt_pf in
-      getThreadC tp tid = Krun c ->
-      corestepN the_sem the_ge (S n0) c m c' m' ->
-      cant_step the_sem c' ->
-      permMapsInv tp (num_threads tp) (getPermMap m) ->
-      step tp m (updThreadC tp tid (Krun c')) m'
+        let: tid := Ordinal tid0_lt_pf in
+        getThreadC tp tid = Krun c ->
+        corestepN the_sem the_ge (S n0) c m c' m' ->
+        cant_step the_sem c' ->
+        permMapsInv tp (num_threads tp) (getPermMap m) ->
+        step tp m (updThreadC tp tid (Krun c')) m'
 
   | step_stage :
       forall tp m c ef args,
@@ -386,6 +394,77 @@ Inductive step : thread_pool -> mem -> thread_pool -> mem -> Prop :=
       permMapsInv tp' (num_threads tp') pnew ->
       updPermMap m pnew = Some m' -> 
       step tp m tp' m'.
+
+
+Inductive step_alt : thread_pool -> mem -> thread_pool -> mem -> Prop :=
+  | stepa_congr : 
+      forall tp m c m' (c' : Modsem.C sem) n0,
+      let: n := counter tp in
+      let: tid0 := schedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+        let: tid := Ordinal tid0_lt_pf in
+        getThreadC tp tid = Krun c ->
+        corestepN the_sem the_ge (S n0) c m c' m' ->
+        cant_step the_sem c' ->
+        (* permMapsInv tp (num_threads tp) (getPermMap m) -> *)
+        step_alt tp m (updThreadC tp tid (Krun c')) m'
+
+  | stepa_stage :
+      forall tp m c ef args,
+      let: n := counter tp in
+      let: tid0 := schedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+      let: tid := Ordinal tid0_lt_pf in
+      getThreadC tp tid = Krun c ->
+      semantics.at_external the_sem c = Some (ef, ef_sig ef, args) ->
+      handled ef ->
+      (* permMapsInv tp (num_threads tp) (getPermMap m) -> *)
+      step_alt tp m (schedNext (updThreadC tp tid (Kstage ef args c))) m
+
+  | stepa_lock :
+      forall tp tp' m c m'' c' m' b ofs pnew,
+      let: n := counter tp in
+      let: tid0 := schedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+      let: tid := Ordinal tid0_lt_pf in
+      getThreadC tp tid = Kstage LOCK (Vptr b ofs::nil) c ->
+      Mem.load Mint32 m b (Int.intval ofs) = Some (Vint Int.one) ->
+      Mem.store Mint32 m b (Int.intval ofs) (Vint Int.zero) = Some m'' ->
+      semantics.after_external the_sem (Some (Vint Int.zero)) c = Some c' ->
+      tp' = updThread tp tid (Krun c') (aggelos n) ->
+      permMapsInv tp' (num_threads tp') pnew ->
+      updPermMap m'' pnew = Some m' -> 
+      step_alt tp m tp' m'
+
+  | stepa_unlock :
+      forall tp tp' m c m'' c' m' b ofs pnew,
+      let: n := counter tp in
+      let: tid0 := schedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+      let: tid := Ordinal tid0_lt_pf in
+      getThreadC tp tid = Kstage UNLOCK (Vptr b ofs::nil) c ->
+      Mem.load Mint32 m b (Int.intval ofs) = Some (Vint Int.zero) ->
+      Mem.store Mint32 m b (Int.intval ofs) (Vint Int.one) = Some m'' ->
+      semantics.after_external the_sem (Some (Vint Int.zero)) c = Some c' ->
+      tp' = updThread tp tid (Krun c') (aggelos n) ->
+      permMapsInv tp' (num_threads tp') pnew ->
+      updPermMap m'' pnew = Some m' -> 
+      step_alt tp m tp' m'
+
+  | stepa_create :
+      forall tp tp' m m' c c' c_new vf arg pnew,
+      let: n := counter tp in
+      let: tid0 := schedule n in
+      forall (tid0_lt_pf :  tid0 < num_threads tp),
+      let: tid := Ordinal tid0_lt_pf in
+      getThreadC tp tid = Kstage CREATE (vf::arg::nil) c ->
+      semantics.initial_core the_sem the_ge vf (arg::nil) = Some c_new ->
+      semantics.after_external the_sem (Some (Vint Int.zero)) c = Some c' ->
+      tp' = schedNext (addThread
+                         (updThread tp tid (Krun c') (aggelos (n+1))) (Krun c_new) (aggelos n)) ->
+      permMapsInv tp' (num_threads tp') pnew ->
+      updPermMap m pnew = Some m' -> 
+      step_alt tp m tp' m'.
                            
 End Corestep.
 
